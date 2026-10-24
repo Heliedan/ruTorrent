@@ -16,11 +16,13 @@ class rTelegram
 		'added' => false,
 		'finished' => false,
 		'removed' => false,
+		'checkfailed' => false,
 	);
 	public $templates = array(
 		'added' => "Torrent {STATE}: {TORRENT}\n{LINK}",
 		'finished' => "Torrent {STATE}: {TORRENT}\n{LINK}",
 		'removed' => "Torrent {STATE}: {TORRENT}\n{LINK}",
+		'checkfailed' => "Torrent check failed: {TORRENT}\n{LINK}",
 	);
 
 	const MAX_TEMPLATE_LENGTH = 4096;
@@ -32,7 +34,7 @@ class rTelegram
 
 	public static function eventNames()
 	{
-		return array('added', 'finished', 'removed');
+		return array('added', 'finished', 'removed', 'checkfailed');
 	}
 
 	public static function load()
@@ -137,6 +139,8 @@ class rTelegram
 
 	public static function defaultTemplate($event)
 	{
+		if($event === 'checkfailed')
+			return "Torrent check failed: {TORRENT}\n{LINK}";
 		return "Torrent {STATE}: {TORRENT}\n{LINK}";
 	}
 
@@ -163,7 +167,11 @@ class rTelegram
 		return $this->enabled && empty($this->validationErrors($event));
 	}
 
-	public function render($event, $torrent, $hash, $comment = '')
+	/**
+	 * $details: what rTorrent passes after the user (see notificationCommand()), all optional: 'size' (bytes),
+	 * 'label' (d.custom1, URL-encoded by ruTorrent) and 'ratio' (thousandths, as d.ratio returns it).
+	 */
+	public function render($event, $torrent, $hash, $comment = '', $details = array())
 	{
 		$template = isset($this->templates[$event]) ? $this->templates[$event] : self::defaultTemplate($event);
 		$state = $event;
@@ -177,12 +185,55 @@ class rTelegram
 			'{TORRENT}' => self::escapeMarkdown((string)$torrent),
 			'{HASH}' => self::escapeMarkdown((string)$hash),
 			'{LINK}' => $link,
+			'{SIZE}' => self::escapeMarkdown(self::formatSize(isset($details['size']) ? $details['size'] : '')),
+			'{LABEL}' => self::escapeMarkdown(self::decodeLabel(isset($details['label']) ? $details['label'] : '')),
+			'{RATIO}' => self::escapeMarkdown(self::formatRatio(isset($details['ratio']) ? $details['ratio'] : '')),
 		);
-		$parts = preg_split('`(\{STATE\}|\{TORRENT\}|\{HASH\}|\{LINK\})`', $template, -1, PREG_SPLIT_DELIM_CAPTURE);
+		$parts = preg_split('`(\{STATE\}|\{TORRENT\}|\{HASH\}|\{LINK\}|\{SIZE\}|\{LABEL\}|\{RATIO\})`', $template, -1, PREG_SPLIT_DELIM_CAPTURE);
 		$message = '';
 		foreach($parts as $i => $part)
 			$message .= ($i % 2) ? $values[$part] : self::escapeMarkdown($part);
 		return self::truncateMessage($message);
+	}
+
+	/** "4.2 GB" from a size in bytes (1024-based, as ruTorrent shows sizes); empty when unknown. */
+	public static function formatSize($bytes)
+	{
+		if(!is_numeric($bytes) || $bytes < 0)
+			return '';
+		$units = array('B', 'KB', 'MB', 'GB', 'TB', 'PB');
+		$size = (float)$bytes;
+		$unit = 0;
+		while($size >= 1024 && $unit < count($units) - 1)
+		{
+			$size /= 1024;
+			$unit++;
+		}
+		return $unit ? number_format($size, 1, '.', '').' '.$units[$unit] : ((int)$size).' B';
+	}
+
+	/** "1.25" from d.ratio, which counts in thousandths; empty when unknown. */
+	public static function formatRatio($thousandths)
+	{
+		if(!is_numeric($thousandths) || $thousandths < 0)
+			return '';
+		return number_format($thousandths / 1000, 2, '.', '');
+	}
+
+	/**
+	 * Whether a hash check found data missing or damaged in a torrent that was complete: rTorrent then marks it
+	 * incomplete and sets this message (seen with rTorrent 0.9.8 after a byte of a seeded file was changed).
+	 * Neither hash_failed nor hash_final_failed runs in that case.
+	 */
+	public static function isFailedCheck($complete, $message)
+	{
+		return (string)$complete === '0' && strpos((string)$message, 'hash check returned unfinished chunks') !== false;
+	}
+
+	/** ruTorrent stores the label URL-encoded in d.custom1. */
+	public static function decodeLabel($label)
+	{
+		return trim(rawurldecode((string)$label));
 	}
 
 	public static function decodeComment($comment)
@@ -263,6 +314,8 @@ class rTelegram
 			case 'added': return $settings->getOnInsertCommand($args);
 			case 'finished': return $settings->getOnFinishedCommand($args);
 			case 'removed': return $settings->getOnEraseCommand($args);
+			// rTorrent runs hash_done after every check; notify.php keeps only the failed ones (isFailedCheck())
+			case 'checkfailed': return $settings->getOnHashdoneCommand($args);
 		}
 		return $settings->getOnFinishedCommand($args);
 	}
@@ -284,7 +337,9 @@ class rTelegram
 		};
 		return getCmd('execute.nothrow').'={sh,-c,'.$quote($script).','.
 			$quote(Utility::getPHP()).','.$quote($path.'/notify.php').','.
-			$quote($event).','.$value('d.get_name').','.$value('d.get_hash').','.$value('d.get_custom2').','.$quote(User::getUser()).'}';
+			$quote($event).','.$value('d.get_name').','.$value('d.get_hash').','.$value('d.get_custom2').','.$quote(User::getUser()).','.
+			$value('d.get_size_bytes').','.$value('d.get_custom1').','.$value('d.get_ratio').','.
+			$value('d.get_complete').','.$value('d.get_message').'}';
 	}
 
 	private static function protectStorage()

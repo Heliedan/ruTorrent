@@ -12,7 +12,7 @@ class TelegramTest extends TestCase
 		$export = $config->get();
 		$this->assertTrue(strpos($export, 'super-secret') === false, 'the bot token is never exported to JavaScript');
 		$this->assertTrue(strpos($export, 'tokenConfigured') !== false, 'the browser receives only token configuration status');
-		$this->assertEquals(3, count(rTelegram::eventNames()), 'all supported event types are declared');
+		$this->assertEquals(4, count(rTelegram::eventNames()), 'all supported event types are declared');
 	}
 
 	public function testInputAndTemplateRendering()
@@ -58,6 +58,38 @@ class TelegramTest extends TestCase
 		$this->assertEquals("✅ Done\\! Movie\\_1 \\(100%\\)\\.\n[link](https://example.org/item)", $config->render('finished', 'Movie_1', 'ABC', 'VRS24mrkerhttps%3A%2F%2Fexample.org%2Fitem'), 'reserved characters of the template text are escaped, the link stays MarkdownV2');
 		$config->templates['added'] = '{unknown} {HASH} - {STATE}';
 		$this->assertEquals('\\{unknown\\} ABC \\- added', $config->render('added', 'Movie', 'ABC'), 'an unknown placeholder is escaped as text');
+	}
+
+	public function testSizeLabelAndRatioPlaceholders()
+	{
+		$config = new rTelegram();
+		$config->templates['finished'] = '{TORRENT} ({SIZE}) - {LABEL} - ratio {RATIO}';
+		$this->assertEquals('Movie \\(4\\.2 GB\\) \\- Films & séries \\- ratio 1\\.25', $config->render('finished', 'Movie', 'ABC', '', array('size' => '4509715660', 'label' => 'Films%20%26%20s%C3%A9ries', 'ratio' => '1250')), 'size, label and ratio are filled and escaped for MarkdownV2');
+		$this->assertEquals('Movie \\(\\) \\-  \\- ratio ', $config->render('finished', 'Movie', 'ABC'), 'missing details (a handler from an older version) leave the placeholders empty');
+		$this->assertEquals('0 B', rTelegram::formatSize('0'), 'zero bytes');
+		$this->assertEquals('1023 B', rTelegram::formatSize('1023'), 'bytes below one KB');
+		$this->assertEquals('1.0 KB', rTelegram::formatSize('1024'), 'one KB, 1024-based');
+		$this->assertEquals('1.5 MB', rTelegram::formatSize((string)(1536 * 1024)), 'megabytes');
+		$this->assertEquals('2.0 TB', rTelegram::formatSize((string)(2 * 1024 * 1024 * 1024 * 1024)), 'terabytes');
+		$this->assertEquals('', rTelegram::formatSize('abc'), 'a non-numeric size is left empty');
+		$this->assertEquals('0.00', rTelegram::formatRatio('0'), 'a zero ratio');
+		$this->assertEquals('12.35', rTelegram::formatRatio('12345'), 'ratio in thousandths, two decimals');
+		$this->assertEquals('', rTelegram::formatRatio('-1'), 'a negative ratio is left empty');
+		$this->assertEquals('', rTelegram::decodeLabel(''), 'no label');
+	}
+
+	public function testFailedCheckIsTheOnlyHashDoneReported()
+	{
+		$message = 'Download registered as completed, but hash check returned unfinished chunks.';
+		$this->assertTrue(rTelegram::isFailedCheck('0', $message), 'a complete torrent found incomplete by a check is reported');
+		$this->assertTrue(!rTelegram::isFailedCheck('1', ''), 'a check that finds the data intact is not reported');
+		$this->assertTrue(!rTelegram::isFailedCheck('0', ''), 'the first check of a torrent still downloading is not reported');
+		$this->assertTrue(!rTelegram::isFailedCheck('0', "Tracker: [Couldn't connect to server]"), 'a tracker message is not a failed check');
+		$this->assertTrue(!rTelegram::isFailedCheck('', ''), 'a handler from an older version passes nothing: not reported');
+		$config = new rTelegram();
+		$this->assertEquals('Torrent check failed: Movie', $config->render('checkfailed', 'Movie', 'ABC'), 'the failed check has its own default message');
+		$config->normalize();
+		$this->assertTrue($config->events['checkfailed'] === false, 'the failed check is off until the user turns it on');
 	}
 
 	public function testStorageStaysReadableByTheGroupOnly()
@@ -147,6 +179,11 @@ class TelegramTest extends TestCase
 		$settings->aliases['d.get_name'] = array('name' => 'd.name', 'prm' => 0);
 		$settings->aliases['d.get_hash'] = array('name' => 'd.hash', 'prm' => 0);
 		$settings->aliases['d.get_custom2'] = array('name' => 'd.custom2', 'prm' => 0);
+		$settings->aliases['d.get_size_bytes'] = array('name' => 'd.size_bytes', 'prm' => 0);
+		$settings->aliases['d.get_custom1'] = array('name' => 'd.custom1', 'prm' => 0);
+		$settings->aliases['d.get_ratio'] = array('name' => 'd.ratio', 'prm' => 0);
+		$settings->aliases['d.get_complete'] = array('name' => 'd.complete', 'prm' => 0);
+		$settings->aliases['d.get_message'] = array('name' => 'd.message', 'prm' => 0);
 		$config = new rTelegram();
 		$command = $config->notificationCommand('finished');
 		$this->assertTrue(strpos($command, 'execute.nothrow') !== false, 'notifications use execute.nothrow');
@@ -155,6 +192,8 @@ class TelegramTest extends TestCase
 		$this->assertTrue(strpos($command, '(cat,(d.name))') !== false, 'the command uses mapped name substitution');
 		$this->assertTrue(strpos($command, '(cat,(d.hash))') !== false, 'the command uses mapped hash substitution');
 		$this->assertTrue(strpos($command, '(cat,(d.custom2))') !== false, 'the command uses mapped comment substitution');
+		$this->assertTrue(preg_match('`\(cat,\(d\.custom2\)\),"[^"]*",\(cat,\(d\.size_bytes\)\),\(cat,\(d\.custom1\)\),\(cat,\(d\.ratio\)\),\(cat,\(d\.complete\)\),\(cat,\(d\.message\)\)\}$`', $command) === 1, 'size, label, ratio, state and message come after the user, so the older notify.php arguments keep their places');
+		$this->assertTrue(strpos($command, ',(cat,(d.complete)),(cat,(d.message))}') !== false, 'the state and message of the torrent follow, for the failed check');
 		$this->assertTrue(strpos($command, '$d.name=') === false, 'the command does not use inert name substitution');
 		$this->assertTrue(strpos($command, '$d.get_hash=') === false, 'the command does not use inert hash substitution');
 		$this->assertTrue(strpos($command, '$d.get_custom2=') === false, 'the command does not use inert comment substitution');

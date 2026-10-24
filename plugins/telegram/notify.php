@@ -11,14 +11,23 @@ $hash = isset($argv[3]) ? $argv[3] : '';
 $comment = isset($argv[4]) ? $argv[4] : '';
 if(isset($argv[5]))
 	$_SERVER['REMOTE_USER'] = $argv[5];
+// Absent when the handler was registered by an older version of the plugin
+$details = array(
+	'size' => isset($argv[6]) ? $argv[6] : '',
+	'label' => isset($argv[7]) ? $argv[7] : '',
+	'ratio' => isset($argv[8]) ? $argv[8] : '',
+);
 
 require_once(dirname(__FILE__).'/telegram.php');
 
 $config = rTelegram::load();
 if(!$config->canNotify($event))
 	exit(0);
+// hash_done runs after every check: only a check that failed is reported
+if($event === 'checkfailed' && !rTelegram::isFailedCheck(isset($argv[9]) ? $argv[9] : '', isset($argv[10]) ? $argv[10] : ''))
+	exit(0);
 
-$message = $config->render($event, $torrent, $hash, $comment);
+$message = $config->render($event, $torrent, $hash, $comment, $details);
 $client = new rTelegramClient();
 $result = $client->send($config->token, $config->chatId, $message, 'MarkdownV2');
 if(empty($result['ok']))

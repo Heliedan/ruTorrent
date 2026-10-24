@@ -38,7 +38,7 @@ if($action === 'testtelegram' || $action === 'test')
 		CachedEcho::send(JSON::safeEncode(array('ok' => false, 'error' => implode('; ', $errors))), 'application/json');
 		exit;
 	}
-	$message = $config->render('finished', 'Telegram test message', 'test');
+	$message = $config->render('finished', 'Telegram test message', 'test', '', array('size' => 4509715660, 'label' => 'Test', 'ratio' => 1250));
 	$result = (new rTelegramClient())->send($config->token, $config->chatId, $message, 'MarkdownV2');
 	if(empty($result['ok']))
 		$result = array('ok' => false, 'error' => isset($result['error']) ? rTelegram::sanitizeError($result['error'], $config->token) : 'Telegram request failed');
